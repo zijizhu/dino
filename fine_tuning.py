@@ -117,6 +117,7 @@ class DINOFinetuning(L.LightningModule):
         pretrained_ckpt_path: str,
         *,
         n_classes: int = 200,
+        loss: str = "soft_xe",
         training_mode: str = "block",
         
         mixup_alpha: float = 1.0,
@@ -158,6 +159,7 @@ class DINOFinetuning(L.LightningModule):
         self.model_name = model_name
         self.pretrained_ckpt_path = pretrained_ckpt_path
         self.training_mode = training_mode
+        self.loss = loss
         
         self.mixup_alpha = mixup_alpha
         self.cutmix_alpha = cutmix_alpha
@@ -195,7 +197,12 @@ class DINOFinetuning(L.LightningModule):
             raise ValueError(f"{self.training_mode} is not a valid mode. Use one of ['full', 'linear']")
         self.head = nn.Linear(self.net.embed_dim, self.n_classes)
 
-        self.loss_fn = SoftTargetCrossEntropy()
+        if self.loss == "soft_xe":
+            self.loss_fn = SoftTargetCrossEntropy()
+        elif self.loss == "xe":
+            self.loss_fn = nn.CrossEntropyLoss()
+        else:
+            raise ValueError
 
         self.train_acc = Accuracy(num_classes=self.n_classes, task="multiclass", average="micro", top_k=1)
         self.val_acc = Accuracy(num_classes=self.n_classes, task="multiclass", average="micro", top_k=1)
