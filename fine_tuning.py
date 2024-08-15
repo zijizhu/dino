@@ -271,7 +271,7 @@ class DINOFinetuning(L.LightningModule):
         
 
 def cli_main():
-    cli = LightningCLI(DINOFinetuning, DataModule)
+    LightningCLI(DINOFinetuning, DataModule)
 
 
 if __name__ == "__main__":
