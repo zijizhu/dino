@@ -175,7 +175,6 @@ class DINOFinetuning(L.LightningModule):
 
         self.image_size = image_size
 
-        # Prepare model depending on fine-tuning mode
         arch = MODEL_DICT[model_name]
         state_dict = torch.load(self.pretrained_ckpt_path, map_location="cpu")
         if self.training_mode == "linear":
@@ -195,7 +194,6 @@ class DINOFinetuning(L.LightningModule):
         else:
             raise ValueError(f"{self.training_mode} is not a valid mode. Use one of ['full', 'linear']")
         self.head = nn.Linear(self.net.embed_dim, self.n_classes)
-        self._check()
 
         self.loss_fn = SoftTargetCrossEntropy()
 
@@ -215,6 +213,9 @@ class DINOFinetuning(L.LightningModule):
         for name, param in self.net.named_parameters():
             if param.requires_grad:
                 self.print(name)
+    
+    def on_train_start(self) -> None:
+        self._check()
 
     def forward(self, x: torch.Tensor):
         x = self.net(x)
@@ -270,7 +271,7 @@ class DINOFinetuning(L.LightningModule):
         
 
 def cli_main():
-    LightningCLI(DINOFinetuning, DataModule)
+    cli = LightningCLI(DINOFinetuning, DataModule)
 
 
 if __name__ == "__main__":
