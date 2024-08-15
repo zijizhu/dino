@@ -233,7 +233,7 @@ class DINOFinetuning(L.LightningModule):
         x, labels = batch
         x = self(x)
 
-        y = F.one_hot(labels, num_classes=self.n_classes) if (labels.ndim == 1) else labels
+        y = F.one_hot(labels, num_classes=self.n_classes) if (self.loss == "soft_xe" and labels.ndim == 1) else labels
         loss = self.loss_fn(x, y)
         acc = getattr(self, f"{mode}_acc")(x, labels)
 

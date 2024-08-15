@@ -3,16 +3,17 @@ trainer:
     class_path: lightning.pytorch.loggers.tensorboard.TensorBoardLogger
     init_args:
       save_dir: logs
-      name: dino_vitb16-n_splits_1-mix-lr_005
+      name: dino_vits16-n_splits_1-no_mix-lr_005
   max_epochs: 100
   val_check_interval: 1.0
 model:
   n_splits: 1
-  model_name: dino_vitb16
-  pretrained_ckpt_path: checkpoints/dino_vitbase16_pretrain.pth
+  model_name: dino_vits16
+  pretrained_ckpt_path: checkpoints/dino_deitsmall16_pretrain.pth
   training_mode: block
-  mixup_alpha: 0.5
-  cutmix_alpha: 0.5
+  loss: xe
+  mixup_alpha: 0.0
+  cutmix_alpha: 0.0
   optimizer: sgd
   lr: 0.005
   momentum: 0.9

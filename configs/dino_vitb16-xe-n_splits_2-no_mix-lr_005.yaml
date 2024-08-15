@@ -1,0 +1,28 @@
+trainer:
+  logger:
+    class_path: lightning.pytorch.loggers.tensorboard.TensorBoardLogger
+    init_args:
+      save_dir: logs
+      name: dino_vitb16-n_splits_2-no_mix-lr_005
+  max_epochs: 100
+  val_check_interval: 1.0
+model:
+  n_splits: 2
+  model_name: dino_vitb16
+  pretrained_ckpt_path: checkpoints/dino_vitbase16_pretrain.pth
+  training_mode: block
+  loss: xe
+  mixup_alpha: 0.0
+  cutmix_alpha: 0.0
+  optimizer: sgd
+  lr: 0.005
+  momentum: 0.9
+  weight_decay: 0.0
+  warmup_steps: 500
+data:
+  dataset: cub200
+  root: datasets/cub200_cropped
+  size: 224
+  batch_size: 128
+  workers: 4
+seed_everything: 42
