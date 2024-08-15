@@ -2,3 +2,5 @@ datasets/
 *.pth
 __pycache__
 *.ipynb
+logs/
+checkpoints/

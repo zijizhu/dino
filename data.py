@@ -3,8 +3,8 @@ from pathlib import Path
 from functools import partial
 from typing import Optional, Sequence
 
-import pytorch_lightning as pl
-from torch.utils.data import DataLoader, default_collate
+import lightning as L
+from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import (
     CIFAR10,
@@ -18,7 +18,6 @@ from torchvision.datasets import (
     OxfordIIITPet,
     StanfordCars,
 )
-import torchvision.transforms.v2 as v2
 
 
 DATASET_DICT = {
@@ -79,7 +78,7 @@ DATASET_DICT = {
 }
 
 
-class DataModule(pl.LightningDataModule):
+class DataModule(L.LightningDataModule):
 
     def __init__(
         self,
@@ -95,12 +94,7 @@ class DataModule(pl.LightningDataModule):
         rand_aug_m: int = 9,
         erase_prob: float = 0.0,
         use_trivial_aug: bool = False,
-        
-        mixup_alpha: float = 1.0,
-        cutmix_alpha: float = 1.0,
-        mix_prob: float = 1.0,
-        label_smoothing: float = 0.0,
-        
+
         mean: Sequence = (0.5, 0.5, 0.5),
         std: Sequence = (0.5, 0.5, 0.5),
         
@@ -139,10 +133,7 @@ class DataModule(pl.LightningDataModule):
         self.rand_aug_m = rand_aug_m
         self.erase_prob = erase_prob
         self.use_trivial_aug = use_trivial_aug
-        self.mixup_alpha = mixup_alpha
-        self.cutmix_alpha = cutmix_alpha
-        self.mix_prob = mix_prob
-        self.label_smoothing = label_smoothing
+
         self.mean = mean
         self.std = std
         self.batch_size = batch_size
@@ -185,12 +176,6 @@ class DataModule(pl.LightningDataModule):
             transforms.ToTensor(),
             transforms.Normalize(mean=self.mean, std=self.std),
         ])
-        
-        cutmix = v2.CutMix(alpha=self.cutmix_alpha, num_classes=self.num_classes)
-        mixup = v2.MixUp(alpha=self.mixup_alpha, num_classes=self.num_classes)
-        self.cutmix_or_mixup = v2.RandomChoice([cutmix, mixup])
-        # self.collate_fn = lambda batch: cutmix_or_mixup(*default_collate(batch))
-        
 
     def setup(self, stage="fit"):
         if self.dataset in ["custom", "cub200"]:
@@ -211,14 +196,12 @@ class DataModule(pl.LightningDataModule):
                 self.test_dataset = self.test_dataset_fn(transform=self.transforms_test, download=False)
 
     def train_dataloader(self):
-        def collate_fn(batch):
-            return self.cutmix_or_mixup(*default_collate(batch))
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
-            collate_fn=collate_fn,
             shuffle=True,
             num_workers=self.workers,
+            persistent_workers=True,
             pin_memory=True)
 
     def val_dataloader(self):
@@ -227,6 +210,7 @@ class DataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.workers,
+            persistent_workers=True,
             pin_memory=True)
 
     def test_dataloader(self):
@@ -235,4 +219,5 @@ class DataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.workers,
+            persistent_workers=True,
             pin_memory=True)

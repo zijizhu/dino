@@ -1,20 +1,24 @@
 import re
 from functools import partial
 
+import lightning as L
 import numpy as np
-import pytorch_lightning as pl
 import torch
+import torch.nn.functional as F
+import torchvision.transforms.v2 as v2
+from lightning.pytorch.cli import LightningCLI
 from timm.loss.cross_entropy import SoftTargetCrossEntropy
 from torch import nn
 from torch.optim import SGD
 from torchmetrics.classification.accuracy import Accuracy
 from transformers.optimization import get_cosine_schedule_with_warmup
 
+from data import DataModule
 from vision_transformer import VisionTransformer
-import torchvision.transforms.v2 as v2
 
 
 def block_expansion_dino(state_dict: dict[str, torch.Tensor], n_splits: int = 3):
+    """Perform Block Expansion on a ViT described in https://arxiv.org/abs/2404.17245"""
     block_keys = set(re.search("^blocks.(\d+).", key).group(0) for key in state_dict if key.startswith("blocks."))
     n_blocks = len(block_keys)
     
@@ -25,7 +29,7 @@ def block_expansion_dino(state_dict: dict[str, torch.Tensor], n_splits: int = 3)
     new_block_indices = list((i + 1) * n_block_per_split - 1 for i in range(n_splits))
     
     expanded_state_dict = dict()
-    learable_param_names = []
+    learnable_param_names = []
     
     for dst_idx, src_idx in enumerate(block_indices.flatten()):
         src_keys = [k for k in state_dict if f"blocks.{src_idx}" in k]
@@ -42,40 +46,32 @@ def block_expansion_dino(state_dict: dict[str, torch.Tensor], n_splits: int = 3)
         expanded_state_dict.update(block_state_dict)
 
         if dst_idx in new_block_indices:
-            learable_param_names += dst_keys
+            learnable_param_names += dst_keys
 
     expanded_state_dict.update({k: v for k, v in state_dict.items() if "block" not in k})
     
-    return expanded_state_dict, len(block_indices.flatten()), learable_param_names
+    return expanded_state_dict, len(block_indices.flatten()), learnable_param_names
 
 
-def vit_small(patch_size=16, depth=12, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=384, depth=depth, num_heads=6, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
-
-
-def vit_base(patch_size=16, depth=12, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=768, depth=depth, num_heads=12, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    return model
+vit_small_config = dict(embed_dim=384, num_heads=6)
+vit_base_config = dict(embed_dim=768, num_heads=12)
+shared_config = dict(depth=12, mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6))
 
 MODEL_DICT = {
-    "dino_vits16": partial(vit_small, patch_size=16, depth=12),
-    "dino_vits8": partial(vit_small, patch_size=8, depth=12),
-    "dino_vitb16": partial(vit_base, patch_size=16, depth=12),
-    "dino_vitb8": partial(vit_base, patch_size=8, depth=12),
+    "dino_vits16": partial(VisionTransformer, patch_size=16, **vit_small_config, **shared_config),
+    "dino_vits8": partial(VisionTransformer, patch_size=8, **vit_small_config, **shared_config),
+    "dino_vitb16": partial(VisionTransformer, patch_size=16, **vit_base_config, **shared_config),
+    "dino_vitb8": partial(VisionTransformer, patch_size=8, **vit_base_config, **shared_config),
 }
 
 
-class DINOFinetuning(pl.LightningModule):
+class DINOFinetuning(L.LightningModule):
     def __init__(
         self,
         n_splits: int,
         model_name: str,
-        ckpt_path: str,
+        pretrained_ckpt_path: str,
+        *,
         n_classes: int = 200,
         training_mode: str = "block",
         
@@ -116,7 +112,7 @@ class DINOFinetuning(pl.LightningModule):
         self.save_hyperparameters()
         self.n_splits = n_splits
         self.model_name = model_name
-        self.ckpt_path = ckpt_path
+        self.pretrained_ckpt_path = pretrained_ckpt_path
         self.training_mode = training_mode
         
         self.mixup_alpha = mixup_alpha
@@ -137,60 +133,57 @@ class DINOFinetuning(pl.LightningModule):
 
         # Prepare model depending on fine-tuning mode
         arch = MODEL_DICT[model_name]
-        state_dict = torch.load(self.ckpt_path, map_location="cpu")
+        state_dict = torch.load(self.pretrained_ckpt_path, map_location="cpu")
         if self.training_mode == "linear":
             self.net = arch(num_classes=0)
             self.net.load_state_dict(state_dict)
             for name, param in self.net.named_parameters():
-                param.requires_grad = "head" in name
-
+                param.requires_grad = False
         elif self.training_mode == "block":
-            
-
-            expanded_state_dict, n_blocks, learable_param_names = block_expansion_dino(state_dict=state_dict,
-                                                                                       n_splits=self.n_splits)
+            expanded_state_dict, n_blocks, learnable_param_names = block_expansion_dino(
+                state_dict=state_dict,
+                n_splits=self.n_splits)
             self.net = arch(num_classes=0, depth=n_blocks)
             self.net.load_state_dict(expanded_state_dict)
 
             for name, param in self.net.named_parameters():
-                param.requires_grad = param in learable_param_names
+                param.requires_grad = name in learnable_param_names
         else:
             raise ValueError(f"{self.training_mode} is not a valid mode. Use one of ['full', 'linear']")
-
         self.head = nn.Linear(self.net.embed_dim, self.n_classes)
+        self._check()
 
-        # Define loss
         self.loss_fn = SoftTargetCrossEntropy()
 
-        # Define metrics
-        self.train_acc = Accuracy(num_classes=self.n_classes, task="multiclass", top_k=1)
-        self.val_acc = Accuracy(num_classes=self.n_classes, task="multiclass", top_k=1)
-        self.test_acc =Accuracy(num_classes=self.n_classes, task="multiclass", top_k=1)
+        self.train_acc = Accuracy(num_classes=self.n_classes, task="multiclass", average="micro", top_k=1)
+        self.val_acc = Accuracy(num_classes=self.n_classes, task="multiclass", average="micro", top_k=1)
+        self.test_acc = Accuracy(num_classes=self.n_classes, task="multiclass", average="micro", top_k=1)
         
         if self.cutmix_alpha > 0 and self.mixup_alpha > 0:
             cutmix = v2.CutMix(alpha=self.cutmix_alpha, num_classes=self.n_classes)
             mixup = v2.MixUp(alpha=self.mixup_alpha, num_classes=self.n_classes)
-            self.cutmix_or_mixup = v2.RandomChoice([cutmix, mixup], p=self.mix_prob)
+            self.cutmix_or_mixup = v2.RandomChoice([cutmix, mixup], p=[self.mix_prob, 1-self.mix_prob])
         else:
             self.cutmix_or_mixup = None
-
+        
+    def _check(self):
+        self.print("Learnable parameters:")
+        for name, param in self.net.named_parameters():
+            if param.requires_grad:
+                self.print(name)
 
     def forward(self, x: torch.Tensor):
         x = self.net(x)
         x = self.head(x)
         return x
 
-    def shared_step(self, batch: tuple[torch.Tensor, ...], mode="train"):
-        if mode == "train" and self.cutmix_or_mixup is not None:
-            batch = self.cutmix_or_mixup(*batch)
-
-        x, y = batch
+    def shared_step(self, batch: tuple[torch.Tensor, ...], mode: str = "train"):
+        x, labels = batch
         x = self(x)
 
+        y = F.one_hot(labels, num_classes=self.n_classes) if (labels.ndim == 1) else labels
         loss = self.loss_fn(x, y)
-
-        labels = y if len(y.shape == 1) else y.argmax(-1)
-        acc = getattr(self, f"{mode}_metrics")(x, labels)
+        acc = getattr(self, f"{mode}_acc")(x, labels)
 
         self.log(f"{mode}_loss", loss, on_epoch=True)
         self.log(f"{mode}_acc", acc, on_epoch=True)
@@ -199,6 +192,10 @@ class DINOFinetuning(pl.LightningModule):
 
     def training_step(self, batch, _):
         self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"], prog_bar=True)
+        
+        if self.cutmix_or_mixup is not None:
+            batch = self.cutmix_or_mixup(*batch)
+
         return self.shared_step(batch, "train")
 
     def validation_step(self, batch, _):
@@ -226,3 +223,11 @@ class DINOFinetuning(pl.LightningModule):
                 "interval": "step",
             },
         }
+        
+
+def cli_main():
+    LightningCLI(DINOFinetuning, DataModule)
+
+
+if __name__ == "__main__":
+    cli_main()
